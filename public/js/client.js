@@ -5,184 +5,256 @@
 /* Array shortcut [Array.last()] */
 Array.prototype.last = function(){return this[this.length-1]};
 
-function unstyle(str){return str.replace(/\//g,'\\/')}
+function unstyle(str){ return str.replace(/\//g,'\\/'); }
+
+/* Send request for topic info */
+function getTopicData() {
+    socket.emit('topicInfo');
+}
+
+/* Send request for user's flair information */
+function sendFlair(flair){
+    socket.emit('command', {
+        name : 'flair',
+        params : {flair : flair}
+    });
+}
+
+function mapOn(target, mapping) {
+    for (var trigger in mapping) {
+        target.on(trigger, mapping[trigger]);
+    }
+}
+
+/**
+ * @inner
+ * @param {string} name
+ * @param {string} input
+ * @param {Array.<string>} expect
+ */
+function parseParams(name, input, expect) {
+    if ('pm block alert unblock unalert'.split(' ').indexOf(name) != -1 && input.trim() == ""){
+        CLIENT.error('Invalid: /'+name+' <nick>');
+    } else {
+        /* Simplified switch statement for client-side commands */
+        switch(name) {
+            case 'pm':
+                var pm = /^(.*?[^\\])\|([\s\S]*)$/.exec(input);
+                if (pm) {
+                    var nick = pm[1].replace('\\|', '|');
+                    return {
+                        nick : nick,
+                        message : pm[2],
+                    };
+                }
+                break;
+            case 'block':
+            case 'alert':
+                add(name, input.trim());
+                break;
+            case 'unblock':
+            case 'unalert':
+                remove(name.substring(2),input.trim());
+                break;
+            case 'kick':
+            case 'ban':
+            case 'permaban':
+                var pm = /^(.*?[^\\])(?:\|([\s\S]*))?$/.exec(input);
+                if (pm) {
+                    var param1 = pm[1].replace('\\|', '|');
+                    var param2 = pm[2]  || " ";
+                    if(name == 'speak'){
+                        return {
+                            message : param1
+
+                        };
+                    } else {
+                        return {
+                            nick : param1,
+                            message : param2
+                        };
+                    }
+                }
+                break;
+            case 'global':
+                var msg = /([\s\S]*)?$/.exec(input);
+                return {
+                    message : msg[0]
+                };
+                break;
+            default:
+                var values = input.split(' ');
+                if (values[0] == '') {
+                    values.shift();
+                }
+                var lastParam = _.last(expect);
+                if (lastParam && /\$$/.test(lastParam) && values.length > expect.length) {
+                    var combine = values.splice(expect.length, values.length - expect.length).join(' ');
+                    values[expect.length - 1] += ' ' + combine;
+                }
+                if (values.length == expect.length) {
+                    var params = {};
+                    values.forEach(function(param, i) {
+                        params[expect[i].replace('$', '')] = param;
+                    });
+                    return params;
+                }
+        }
+    }
+}
 
 var roles = ['god','super','admin','mod','basic','mute'];
 
+/* Create socket.io connection */
+var socket = io('/' + window.channel);
+
 /* Create online user list */
-ONLINE = new Backbone.Collection();
+var ONLINE = new Backbone.Collection();
 
-$(Init);
-$(Cursors);
-
-function Init() {
-    var socket = io('/' + window.channel);
-
-    /* Backbone model containing functions to manage the user chat interface */
-    var Client = Backbone.Model.extend({
-        initialize : function() {
-            /* Initialize from localstorage. */
-            'color join font style mute play nick images security flair styles bg access_level role part menu_top menu_left menu_display mask frame'.split(' ').forEach(function(key) {
-                var item = localStorage.getItem('chat-' + key);
-                this.set(key, item);
-                this.on('change:' + key, function(m, value) {
-                    if (value) {
-                        localStorage.setItem('chat-' + key, value);
-                    } else {
-                        localStorage.removeItem('chat-' + key);
-                    }
-                });
-            }, this);
-
-            /* Notify when values change. */
-            'color style flair mute play images styles bg role access_level part mask frame'.split(' ').forEach(function(key) {
-                this.on('change:' + key, function(m, value) {
-                    if (value) {
-                        this.show(key + ': ' + value);
-                    } else {
-                        this.show(key + ' reset to default');
-                    }
-                }, this);
-            }, this);
-
-            /* Display message sample to user */
-            'color style font flair'.split(' ').forEach(function(key) {
-                this.on('change:' + key, function(m, value) {
-                    this.submit('/echo Now your messages look like this');
-                }, this);
-            }, this);
-        },
-
-        /* Return all valid commands */
-        getAvailableCommands : function() {
-            var myrole = this.get('role');
-            return myrole == null ? [] : _.filter(_.keys(COMMANDS), function(key) {
-                var cmd_level = COMMANDS[key].role;
-                return cmd_level == null || roles.indexOf(myrole) <= roles.indexOf(cmd_level);
+/* Backbone model containing functions to manage the user chat interface */
+var Client = Backbone.Model.extend({
+    initialize : function() {
+        /* Initialize from localstorage. */
+        'color join font style mute play nick images security flair styles bg access_level role part menu_top menu_left menu_display mask frame'.split(' ').forEach(function(key) {
+            var item = localStorage.getItem('chat-' + key);
+            this.set(key, item);
+            this.on('change:' + key, function(m, value) {
+                if (value) {
+                    localStorage.setItem('chat-' + key, value);
+                } else {
+                    localStorage.removeItem('chat-' + key);
+                }
             });
-        },
+        }, this);
 
-        /* Parse and sends message to server */
-        submit : function(input) {
-            var access_level = parseInt(this.get('access_level'));
-            if (access_level < 0) {
-                access_level = 3;
-            }
+        /* Notify when values change. */
+        'color style flair mute play images styles bg role access_level part mask frame'.split(' ').forEach(function(key) {
+            this.on('change:' + key, function(m, value) {
+                if (value) {
+                    this.show(key + ': ' + value);
+                } else {
+                    this.show(key + ' reset to default');
+                }
+            }, this);
+        }, this);
 
-            var parsed = /^\/(\w+) ?([\s\S]*)/.exec(input);
+        /* Display message sample to user */
+        'color style font flair'.split(' ').forEach(function(key) {
+            this.on('change:' + key, function(m, value) {
+                this.submit('/echo Now your messages look like this');
+            }, this);
+        }, this);
+    },
 
-            if (parsed) {
-                var specs = parsed[2];
-                var name = parsed[1].toLowerCase();
-                var cmd = COMMANDS[name];
-                if (cmd && roles.indexOf(this.get('role')) <= roles.indexOf(cmd.role || 'basic')) {
-                    var expect = cmd.params || [];
-                    var params = parseParams(name, specs, expect);
-                    if (expect.length == 0 || params) {
-                        var handler = typeof cmd == 'function' ? cmd : cmd.handler;
-                        if (handler) {
-                            handler(params);
-                        } else {
-                            socket.emit('command', {
-                                name : name,
-                                params : params
-                            });
-                        }
+    /* Return all valid commands */
+    getAvailableCommands : function() {
+        var myrole = this.get('role');
+        return myrole == null ? [] : _.filter(_.keys(COMMANDS), function(key) {
+            var cmd_level = COMMANDS[key].role;
+            return cmd_level == null || roles.indexOf(myrole) <= roles.indexOf(cmd_level);
+        });
+    },
+
+    /* Parse and sends message to server */
+    submit : function(input) {
+        var access_level = parseInt(this.get('access_level'));
+        if (access_level < 0) {
+            access_level = 3;
+        }
+
+        var parsed = /^\/(\w+) ?([\s\S]*)/.exec(input);
+
+        if (parsed) {
+            var specs = parsed[2];
+            var name = parsed[1].toLowerCase();
+            var cmd = COMMANDS[name];
+            if (cmd && roles.indexOf(this.get('role')) <= roles.indexOf(cmd.role || 'basic')) {
+                var expect = cmd.params || [];
+                var params = parseParams(name, specs, expect);
+                if (expect.length == 0 || params) {
+                    var handler = typeof cmd == 'function' ? cmd : cmd.handler;
+                    if (handler) {
+                        handler(params);
                     } else {
-                        CLIENT.error('Invalid: /' + name + ' <' + expect.join('> <').replace('$', '') + '>');
+                        socket.emit('command', {
+                            name : name,
+                            params : params
+                        });
                     }
                 } else {
-                    CLIENT.error('Invalid command. Use /help for a list of commands.');
+                    CLIENT.error('Invalid: /' + name + ' <' + expect.join('> <').replace('$', '') + '>');
                 }
             } else {
-                var input = this.decorate(input);
-                var flair = this.get('flair');
-                if (!this.get('idle')) {
-                    socket.emit('message', {
-                        flair : flair,
-                        message : input
-                    });
-                } else {
-                    CLIENT.show({
-                        type : 'chat-message',
-                        nick : this.get('nick'),
-                                message : input,
-                                flair : flair
-                    });
-                }
+                CLIENT.error('Invalid command. Use /help for a list of commands.');
             }
-        },
-
-        show : function(message) {
-            this.trigger('message', message);
-        },
-
-        error : function(content) {
-            this.trigger('message', {
-                type: 'error-message',
-                message: content
-            });
-        },
-
-        /* List of invalid fonts */
-        badfonts : [],
-
-        /* Add formating to incoming text */
-        decorate : function(input) {
-            if (input.charAt(0) != '>' || input.search(/(^|[> ])>>\d+/) == 0
-                || input.search(/>>>(\/[a-z0-9]+)\/(\d+)?\/?/i) == 0) {
-                var style = this.get('style');
-            var color = this.get('color');
-            var font = this.get('font');
-            if (style) {
-                style = style.replace(/\/\+/g, '');
-                if(style.split('/^').length > 4){
-                    amount = style.split('/^').length;
-                    for (i = 0; i < amount - 4; i++) {
-                        style = style.replace(/\/\^/i, '');
-                    }
-                }
-                input = style + input;
+        } else {
+            var input = this.decorate(input);
+            var flair = this.get('flair');
+            if (!this.get('idle')) {
+                socket.emit('message', {
+                    flair : flair,
+                    message : input
+                });
+            } else {
+                CLIENT.show({
+                    type : 'chat-message',
+                    nick : this.get('nick'),
+                            message : input,
+                            flair : flair
+                });
             }
-            input = ' ' + input;
-            color ? input = '#' + color + input + ' ' : input = input + ' ';
-            if (font) {
-                input = '$' + font + '|' + input;
-            }
-                }
-                return input;
-        },
-
-        updateMousePosition : function(position) {
-            socket.emit('updateMousePosition', position);
         }
-    });
+    },
 
-    /* Create client */
-    CLIENT = new Client();
+    show : function(message) {
+        this.trigger('message', message);
+    },
 
-    var socketMapping = {
-        'join': onJoin,
-        'online': onOnline,
-        'left': onLeft,
-        'nick': onNick,
-        'update': onUpdate,
-        'centermsg': onCenterMsg,
-        'alive': onAlive,
-        'playvid': onPlayVid,
-        'message': onMessage,
-        'connect': onConnect,
-        'disconnect': onDisconnect,
-        'refresh': onRefresh,
-        'updateMousePosition': onUpdateMousePosition
-    };
+    error : function(content) {
+        this.trigger('message', {
+            type: 'error-message',
+            message: content
+        });
+    },
 
-    for (var trigger in socketMapping) {
-        socket.on(trigger, socketMapping[trigger]);
+    /* List of invalid fonts */
+    badfonts : [],
+
+    /* Add formating to incoming text */
+    decorate : function(input) {
+        if (input.charAt(0) != '>' || input.search(/(^|[> ])>>\d+/) == 0
+            || input.search(/>>>(\/[a-z0-9]+)\/(\d+)?\/?/i) == 0) {
+            var style = this.get('style');
+        var color = this.get('color');
+        var font = this.get('font');
+        if (style) {
+            style = style.replace(/\/\+/g, '');
+            if(style.split('/^').length > 4){
+                amount = style.split('/^').length;
+                for (i = 0; i < amount - 4; i++) {
+                    style = style.replace(/\/\^/i, '');
+                }
+            }
+            input = style + input;
+        }
+        input = ' ' + input;
+        color ? input = '#' + color + input + ' ' : input = input + ' ';
+        if (font) {
+            input = '$' + font + '|' + input;
+        }
+            }
+            return input;
+    },
+
+    updateMousePosition : function(position) {
+        socket.emit('updateMousePosition', position);
     }
+});
+
+var handler = new function() {
 
     /* Add user to list and show message */
-    function onJoin(user) {
+    this.join = function(user) {
         user.nick = unstyle(user.nick);
         ONLINE.add(user);
         if (CLIENT.get('join') == 'on') {
@@ -195,15 +267,15 @@ function Init() {
         if (CLIENT.has('part')) {
             socket.emit('SetPart', CLIENT.get('part'));
         }
-    }
+    };
 
     /* Synchronize user list with server */
-    function onOnline(users) {
+    this.online = function(users) {
         ONLINE.add(users);
-    }
+    };
 
     /* Show user leave message with part, if it exists */
-    function onLeft(user) {
+    this.left = function(user) {
         ONLINE.remove(user.id);
         if (!user.kicked && CLIENT.get('join') == 'on') {
             CLIENT.show({
@@ -211,10 +283,10 @@ function Init() {
                 message : user.nick + ' has left ' + (user.part || '')
             });
         }
-    }
+    };
 
     /* Trigger name change message */
-    function onNick(info) {
+    this.nick = function(info) {
         var user = ONLINE.get(info.id);
         var old = user.get('nick');
         info.nick = unstyle(info.nick);
@@ -223,38 +295,38 @@ function Init() {
             type : 'general-message',
             message : old + ' is now known as ' + info.nick
         });
-    }
+    };
 
     /* Update user information */
-    function onUpdate(info) {
+    this.update = function(info) {
         if (info.role == 'mute') {
             info.role = 'basic';
             info.idle = 1;
         }
         CLIENT.set(info);
-    }
+    };
 
     /* Update the large center message */
-    function onCenterMsg(data) {
+    this.centermsg = function(data) {
         CLIENT.set('msg', data.msg);
-    }
+    };
 
     /* Client side check to see if user is active */
-    function onAlive() {
+    this.alive = function() {
         socket.emit('alive');
-    }
+    };
 
     /* Play youtube video when activated */
-    function onPlayVid(url) {
+    this.playvid = function(url) {
         if(url.url == "stop" || CLIENT.get('mute') == 'on' || CLIENT.get('play') == 'off') {
             $("#youtube")[0].innerHTML = "";
         } else {
             $("#youtube")[0].innerHTML = "<iframe width=\"420\" height=\"345\" src=\"https://www.youtube.com/embed/" + url.url +"?autoplay=1\" frameborder=\"0\" allowfullscreen></iframe>";
         }
-    }
+    };
 
     /* Show messages from users that aren't blocked */
-    function onMessage(msg) {
+    this.message = function(msg) {
         if (!msg.nick) {
             CLIENT.show(msg);
         } else {
@@ -265,244 +337,223 @@ function Init() {
                 CLIENT.show(msg);
             }
         }
-    }
+    };
 
-    function onUpdateMousePosition(msg) {
+    this.updateMousePosition = function(msg) {
         CLIENT.trigger('updateMousePosition', msg);
-    }
+    };
 
     /* Send user info after connecting to the server */
-    function onConnect() {
+    this.connect = function() {
         socket.emit('join', {
             nick : CLIENT.get('nick'),
                     security : CLIENT.get('security')
         });
-    }
+    };
 
     /* Display disconnect message */
-    function onDisconnect() {
+    this.disconnect = function() {
         ONLINE.reset();
         CLIENT.error('Socket connection closed');
-    }
+    };
 
     /* Refresh window on command */
-    function onRefresh() {
+    this.refresh = function() {
         window.location.reload();
-    }
-
-    /* Send request for topic info */
-    getTopicData = function() {
-        socket.emit('topicInfo');
     };
+};
 
-    /* Send request for user's flair information */
-    sendFlair = function(flair){
-        socket.emit('command', {
-            name : 'flair',
-            params : {flair : flair}
-        });
-    };
+var socketMapping = {
+    'join': handler.join,
+    'online': handler.online,
+    'left': handler.left,
+    'nick': handler.nick,
+    'update': handler.update,
+    'centermsg': handler.centermsg,
+    'alive': handler.alive,
+    'playvid': handler.playvid,
+    'message': handler.message,
+    'updateMousePosition': handler.updateMousePosition,
+    'connect': handler.connect,
+    'disconnect': handler.disconnect,
+    'refresh': handler.refresh
+};
 
-    /**
-     * @inner
-     * @param {string} name
-     * @param {string} input
-     * @param {Array.<string>} expect
-     */
-    function parseParams(name, input, expect) {
-        if ('pm block alert unblock unalert'.split(' ').indexOf(name) != -1 && input.trim() == ""){
-            CLIENT.error('Invalid: /'+name+' <nick>');
-        } else {
-            /* Simplified switch statement for client-side commands */
-            switch(name) {
-                case 'pm':
-                    var pm = /^(.*?[^\\])\|([\s\S]*)$/.exec(input);
-                    if (pm) {
-                        var nick = pm[1].replace('\\|', '|');
-                        return {
-                            nick : nick,
-                            message : pm[2],
-                        };
-                    }
-                    break;
-                case 'block':
-                case 'alert':
-                    add(name, input.trim());
-                    break;
-                case 'unblock':
-                case 'unalert':
-                    remove(name.substring(2),input.trim());
-                    break;
-                case 'kick':
-                case 'ban':
-                case 'permaban':
-                    var pm = /^(.*?[^\\])(?:\|([\s\S]*))?$/.exec(input);
-                    if (pm) {
-                        var param1 = pm[1].replace('\\|', '|');
-                        var param2 = pm[2]  || " ";
-                        if(name == 'speak'){
-                            return {
-                                message : param1
+/* Create client */
+var CLIENT = new Client();
 
-                            };
-                        } else {
-                            return {
-                                nick : param1,
-                                message : param2
-                            };
-                        }
-                    }
-                    break;
-                case 'global':
-                    var msg = /([\s\S]*)?$/.exec(input);
-                    return {
-                        message : msg[0]
-                    };
-                    break;
-                default:
-                    var values = input.split(' ');
-                    if (values[0] == '') {
-                        values.shift();
-                    }
-                    var lastParam = _.last(expect);
-                    if (lastParam && /\$$/.test(lastParam) && values.length > expect.length) {
-                        var combine = values.splice(expect.length, values.length - expect.length).join(' ');
-                        values[expect.length - 1] += ' ' + combine;
-                    }
-                    if (values.length == expect.length) {
-                        var params = {};
-                        values.forEach(function(param, i) {
-                            params[expect[i].replace('$', '')] = param;
-                        });
-                        return params;
-                    }
-            }
-        }
-    }
-}
+var Core = new function() {
+    mapOn(socket, socketMapping);
+};
 
 // -----------------------------------------------------------------------------
 // Topic
 // -----------------------------------------------------------------------------
+var topicHandler = new function() {
 
-$(function() {
-    var blurred = false;
-    var unread = 0;
-
-    /* Change unread count */
-    function updateTitle() {
-        var topic = CLIENT.get('topic');
-        if (topic) {
-            if (blurred && unread > 0) {
-                document.title = '(' + unread + ') ' + topic.replace('\\n', '');
-            } else {
-                document.title = topic.replace('\\n', '');
-            }
-        }
-    }
-    $(window).blur(function() {
-        blurred = true;
-        unread = 0;
-    });
-    $(window).focus(function() {
-        $("#icon").attr("href","../img/icon2.ico");
-        blurred = false;
-        updateTitle();
-    });
     /* Update unread status */
-    CLIENT.on('message', function(message) {
-        if (blurred) {
-            unread++;
-            updateTitle();
+    this.message = function(message) {
+        if (Topic.blurred) {
+            Topic.unread++;
+            Topic.updateTitle();
         }
-    });
-    CLIENT.on('change:msg', function(m, msg){
+    };
+
+    this.change_msg = function(m, msg){
         $('#content').html(parser.parse(msg));
-    });
+    };
+
     /* Show notification when it is updated */
-    CLIENT.on('change:notification', function(m, notification) {
-        updateTitle();
+    this.change_notification = function(m, notification) {
+        Topic.updateTitle();
         parser.getAllFonts(notification);
         CLIENT.show({
             type : 'note-message',
             message : notification
         });
-    });
+    };
+
     /* Show topic when updated */
-    CLIENT.on('change:topic', function(m, topic) {
-        updateTitle();
+    this.change_topic = function(m, topic) {
+        Topic.updateTitle();
         CLIENT.show({
             type : 'general-message',
             message : 'Topic: ' + topic
         });
-    });
+    };
+
     /* Set the frame when changed */
-    CLIENT.on('change:frame_src', function(m) {
+    this.change_frame_src = function(m) {
         var url = CLIENT.get('frame_src');
         if(CLIENT.get('frame') == 'on' && parser.linkreg.exec(url) && url){
             $('#messages').append("<div class=frame><iframe width=\"100%\" height=\"100%\" src=\"" + url + "\"frameborder=\"0\" sandbox=\"allow-same-origin allow-scripts\"></iframe></div>")
         } else if(url == "none") {
             $(".frame").remove();
         }
-    });
-    CLIENT.on('change:frame', function(){
-        if(CLIENT.get('frame') == 'off'){
+    };
+
+    this.change_frame = function() {
+        if(CLIENT.get('frame') == 'off') {
             $(".frame").remove();
-        } else if(CLIENT.get('frame_src')){
-            $('#messages').append("<div class=frame><iframe width=\"100%\" height=\"100%\" src=\"" + CLIENT.get('frame_src') + "\"frameborder=\"0\" sandbox=\"allow-same-origin allow-scripts\"></iframe></div>")
+        } else if(CLIENT.get('frame_src')) {
+            $('#messages').append("<div class=frame><iframe width=\"100%\" height=\"100%\" src=\"" + CLIENT.get('frame_src') + "\"frameborder=\"0\" sandbox=\"allow-same-origin allow-scripts\"></iframe></div>");
         }
-    });
+    };
+
     /* Turn play off */
-    CLIENT.on('change:play', function(){
+    this.change_play = function(){
         if(CLIENT.get('play') == 'off'){
             $("#youtube")[0].innerHTML = "";
         }
-    });
-    CLIENT.on('change:mute', function(m, mute) {
+    };
+
+    this.change_mute = function(m, mute) {
         if (mute == 'on') {
             $('audio').each(function() {
                 this.pause();
             });
         }
+    };
+};
+
+var topicMapping = {
+    'message': topicHandler.message,
+    'change:msg': topicHandler.change_msg,
+    'change:notification': topicHandler.change_notification,
+    'change:topic': topicHandler.change_topic,
+    'change:frame_src': topicHandler.change_frame_src,
+    'change:frame': topicHandler.change_frame,
+    'change:play': topicHandler.change_play,
+    'change:mute': topicHandler.change_mute
+
+};
+
+// TODO: rename?
+var Topic = new function() {
+    this.blurred = false;
+    this.unread = 0;
+
+    this.updateTitle = function() {
+        var topic = CLIENT.get('topic');
+
+        if (topic) {
+            document.title = topic.replace('\\n', '');
+        }
+        else
+        {
+            document.title = 'ch4t';
+        }
+
+        if (Topic.blurred && Topic.unread > 0) {
+            document.title = '(' + Topic.unread + ') ' + document.title;
+        }
+    };
+
+    $(window).blur(function() {
+        Topic.blurred = true;
+        Topic.unread = 0;
     });
-});
+
+    $(window).focus(function() {
+        $("#icon").attr("href","../img/icon2.ico");
+        Topic.blurred = false;
+        Topic.updateTitle();
+    });
+
+    mapOn(CLIENT, topicMapping);
+};
 
 // -----------------------------------------------------------------------------
 // Theme
 // -----------------------------------------------------------------------------
-
-$(function() {
-    CLIENT.on('change:background', function(m, background) {
+var themeHandler = new function()
+{
+    this.change_background = function(m, background) {
         if (background && CLIENT.get('bg') == 'on' && background != 'default')
             $('#messages').css('background', background);
         CLIENT.set('old', background);
-    });
-    CLIENT.on('change:theme_style', function(m, theme_style) {
+    };
+
+    this.change_theme_style = function(m, theme_style) {
         if (theme_style) {
             $('body').attr("class", theme_style);
         } else {
             $('body').attr('class', '');
         }
-    });
-    CLIENT.on('change:bg', function(m, bg){
-        if(bg == 'on'){
+    };
+
+    this.change_bg = function(m, bg) {
+        if(bg == 'on') {
             $('#messages').css('background', CLIENT.get('old'));
         } else {
             $('#messages').css('background', 'url(/public/css/img/bg.png) center / auto 50% no-repeat rgb(17, 17, 17)');
         }
-    });
+    };
+
     /* Set the theme for scrollbar and input textarea */
-    CLIENT.on('change:chat_style', function(m, style){
+    this.change_chat_style = function(m, style){
         style = CLIENT.get('chat_style').split(',');
         if (!style[2]) style[2] = '#000';
-              $('#input-bar').css('background-color', style[0]);
+        $('#input-bar').css('background-color', style[0]);
         $('#user-list').css('background-color', style[2]);
 
         if(navigator.userAgent.toLowerCase().indexOf('chrome') > -1) {
             document.styleSheets[1].deleteRule(15);
             document.styleSheets[1].insertRule(".scrollbar_default::-webkit-scrollbar-thumb { border-radius: 5px; background: " + style[1] + "",15);
         }
-    });
+    };
+}
+
+var themeMapping = {
+    'change:background': themeHandler.change_background,
+    'change:theme_style': themeHandler.change_theme_style,
+    'change:bg': themeHandler.change_bg,
+    'change:chat_style': themeHandler.change_chat_style
+
+}
+
+var Theme = new function() {
+    mapOn(CLIENT, themeMapping);
 
     /* Set all attributes at initialization */
     _.each(['images', 'bg', 'styles', 'frame', 'play', 'join'], function(e) {
@@ -511,18 +562,61 @@ $(function() {
     _.each(['block', 'alert'], function(e) {
         CLIENT.set(e, []);
     });
-});
+};
 
 // -----------------------------------------------------------------------------
 // Online User Tracking
 // -----------------------------------------------------------------------------
 
-$(function() {
+var usersHandler = new function() {
+
+    /* Add user to the tabbed menu and update count */
+    this.add = function(user) {
+        var li = $('<li class="users"></li>').attr({
+            class : 'online-' + user.get('id'),
+                                                   id : user.get('id')
+        }).appendTo('.online');
+
+        /* Limit the maximum length to be displayed */
+        var nick = $('<span></span>').text(user.get('nick').substr(0,35)).appendTo(li);
+        li.append(' ');
+
+        user.on('change:nick', function() {
+            nick.text(user.get('nick').substr(0,35));
+        });
+
+        CLIENT.on('change:menu_display', function(e) {
+            Users.updateCount();
+        });
+
+        Users.updateCount();
+    };
+
+    /* Remove a user from the menu */
+    this.remove = function(user) {
+        $('.online-' + user.get('id')).remove();
+        Users.updateCount();
+    };
+
+    this.reset = function() {
+        $('.online').html('');
+    };
+};
+
+var usersMapping = {
+    'add': usersHandler.add,
+    'remove': usersHandler.remove,
+    'reset': usersHandler.reset
+};
+
+var Users = new function() {
+
+    mapOn(ONLINE, usersMapping);
 
     /* Update menu user count */
-    function updateCount() {
+    this.updateCount = function() {
         $('#tabbed-menu').text(ONLINE.size());
-    }
+    };
 
     /* Hide and show popup user menu */
     $('#tabbed-menu').click(function(){
@@ -535,40 +629,19 @@ $(function() {
         }
         $('#user-list').slideToggle();
     });
+
     $(document).on('focus', 'textarea', function() {// Fix for users with an OSK, such as mobile.
         if ($('#user-list').css('display') == 'block' && $('#user-list').css('overflow') == 'visible') {
             $('#user-list').slideToggle();
         }
     });
-    if (CLIENT.get('menu_display')){
+
+    if (CLIENT.get('menu_display')) {
         $('.menu-container').css('left',CLIENT.get('menu_left'));
         $('.menu-container').css('top',CLIENT.get('menu_top'));
     }
-    /* Add user to the tabbed menu and updates count */
-    ONLINE.on('add', function(user) {
-        var li = $('<li class="users"></li>').attr({
-            class : 'online-' + user.get('id'),
-                                                   id : user.get('id')
-        }).appendTo('.online');
-        /* Limit the maximum length to be displayed */
-        var nick = $('<span></span>').text(user.get('nick').substr(0,35)).appendTo(li);
-        li.append(' ');
-        user.on('change:nick', function() {
-            nick.text(user.get('nick').substr(0,35));
-        });
-        CLIENT.on('change:menu_display', function(e) {
-            updateCount();
-        });
-        updateCount();
-    });
-    /* Remove user div from the menu */
-    ONLINE.on('remove', function(user) {
-        $('.online-' + user.get('id')).remove();
-        updateCount();
-    });
-    ONLINE.on('reset', function() {
-        $('.online').html('');
-    });
+
+
     $('#tabbed-menu-cotainer').draggable({
         revert: 'invalid',
         drag : function(){
@@ -660,7 +733,7 @@ $(function() {
     $('.online').click(function(e){
         $('.data-title').attr('data-menutitle', e.target.textContent);
     });
-});
+};
 
 // -----------------------------------------------------------------------------
 // Messages
@@ -1201,6 +1274,7 @@ $(function() {
                  attribute = 'background';
                  break;
              case 'topic':
+                 console.log("getTopicData");
                  getTopicData();
          }
          if (attribute == 'theme') {
