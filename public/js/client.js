@@ -3,18 +3,186 @@
 // -----------------------------------------------------------------------------
 
 /* Array shortcut [Array.last()] */
-Array.prototype.last = function(){return this[this.length-1]}
+Array.prototype.last = function(){return this[this.length-1]};
 
-/* Make online user list */
+function unstyle(str){return str.replace(/\//g,'\\/')}
+
+var roles = ['god','super','admin','mod','basic','mute'];
+
+/* Create online user list */
 ONLINE = new Backbone.Collection();
 
-$(function() {
+$(Init);
+$(Cursors);
+
+function Init() {
     var socket = io('/' + window.channel);
-    var roles = ['god','super','admin','mod','basic','mute'];
-    function unstyle(str){return str.replace(/\//g,'\\/')}
+
+    /* Backbone model containing functions to manage the user chat interface */
+    var Client = Backbone.Model.extend({
+        initialize : function() {
+            /* Initialize from localstorage. */
+            'color join font style mute play nick images security flair styles bg access_level role part menu_top menu_left menu_display mask frame'.split(' ').forEach(function(key) {
+                var item = localStorage.getItem('chat-' + key);
+                this.set(key, item);
+                this.on('change:' + key, function(m, value) {
+                    if (value) {
+                        localStorage.setItem('chat-' + key, value);
+                    } else {
+                        localStorage.removeItem('chat-' + key);
+                    }
+                });
+            }, this);
+
+            /* Notify when values change. */
+            'color style flair mute play images styles bg role access_level part mask frame'.split(' ').forEach(function(key) {
+                this.on('change:' + key, function(m, value) {
+                    if (value) {
+                        this.show(key + ': ' + value);
+                    } else {
+                        this.show(key + ' reset to default');
+                    }
+                }, this);
+            }, this);
+
+            /* Display message sample to user */
+            'color style font flair'.split(' ').forEach(function(key) {
+                this.on('change:' + key, function(m, value) {
+                    this.submit('/echo Now your messages look like this');
+                }, this);
+            }, this);
+        },
+
+        /* Return all valid commands */
+        getAvailableCommands : function() {
+            var myrole = this.get('role');
+            return myrole == null ? [] : _.filter(_.keys(COMMANDS), function(key) {
+                var cmd_level = COMMANDS[key].role;
+                return cmd_level == null || roles.indexOf(myrole) <= roles.indexOf(cmd_level);
+            });
+        },
+
+        /* Parse and sends message to server */
+        submit : function(input) {
+            var access_level = parseInt(this.get('access_level'));
+            if (access_level < 0) {
+                access_level = 3;
+            }
+
+            var parsed = /^\/(\w+) ?([\s\S]*)/.exec(input);
+
+            if (parsed) {
+                var specs = parsed[2];
+                var name = parsed[1].toLowerCase();
+                var cmd = COMMANDS[name];
+                if (cmd && roles.indexOf(this.get('role')) <= roles.indexOf(cmd.role || 'basic')) {
+                    var expect = cmd.params || [];
+                    var params = parseParams(name, specs, expect);
+                    if (expect.length == 0 || params) {
+                        var handler = typeof cmd == 'function' ? cmd : cmd.handler;
+                        if (handler) {
+                            handler(params);
+                        } else {
+                            socket.emit('command', {
+                                name : name,
+                                params : params
+                            });
+                        }
+                    } else {
+                        CLIENT.error('Invalid: /' + name + ' <' + expect.join('> <').replace('$', '') + '>');
+                    }
+                } else {
+                    CLIENT.error('Invalid command. Use /help for a list of commands.');
+                }
+            } else {
+                var input = this.decorate(input);
+                var flair = this.get('flair');
+                if (!this.get('idle')) {
+                    socket.emit('message', {
+                        flair : flair,
+                        message : input
+                    });
+                } else {
+                    CLIENT.show({
+                        type : 'chat-message',
+                        nick : this.get('nick'),
+                                message : input,
+                                flair : flair
+                    });
+                }
+            }
+        },
+
+        show : function(message) {
+            this.trigger('message', message);
+        },
+
+        error : function(content) {
+            this.trigger('message', {
+                type: 'error-message',
+                message: content
+            });
+        },
+
+        /* List of invalid fonts */
+        badfonts : [],
+
+        /* Add formating to incoming text */
+        decorate : function(input) {
+            if (input.charAt(0) != '>' || input.search(/(^|[> ])>>\d+/) == 0
+                || input.search(/>>>(\/[a-z0-9]+)\/(\d+)?\/?/i) == 0) {
+                var style = this.get('style');
+            var color = this.get('color');
+            var font = this.get('font');
+            if (style) {
+                style = style.replace(/\/\+/g, '');
+                if(style.split('/^').length > 4){
+                    amount = style.split('/^').length;
+                    for (i = 0; i < amount - 4; i++) {
+                        style = style.replace(/\/\^/i, '');
+                    }
+                }
+                input = style + input;
+            }
+            input = ' ' + input;
+            color ? input = '#' + color + input + ' ' : input = input + ' ';
+            if (font) {
+                input = '$' + font + '|' + input;
+            }
+                }
+                return input;
+        },
+
+        updateMousePosition : function(position) {
+            socket.emit('updateMousePosition', position);
+        }
+    });
+
+    /* Create client */
+    CLIENT = new Client();
+
+    var socketMapping = {
+        'join': onJoin,
+        'online': onOnline,
+        'left': onLeft,
+        'nick': onNick,
+        'update': onUpdate,
+        'centermsg': onCenterMsg,
+        'alive': onAlive,
+        'playvid': onPlayVid,
+        'message': onMessage,
+        'connect': onConnect,
+        'disconnect': onDisconnect,
+        'refresh': onRefresh,
+        'updateMousePosition': onUpdateMousePosition
+    };
+
+    for (var trigger in socketMapping) {
+        socket.on(trigger, socketMapping[trigger]);
+    }
 
     /* Add user to list and show message */
-    socket.on('join', function(user) {
+    function onJoin(user) {
         user.nick = unstyle(user.nick);
         ONLINE.add(user);
         if (CLIENT.get('join') == 'on') {
@@ -27,15 +195,15 @@ $(function() {
         if (CLIENT.has('part')) {
             socket.emit('SetPart', CLIENT.get('part'));
         }
-    });
+    }
 
     /* Synchronize user list with server */
-    socket.on('online', function(users) {
+    function onOnline(users) {
         ONLINE.add(users);
-    });
+    }
 
     /* Show user leave message with part, if it exists */
-    socket.on('left', function(user) {
+    function onLeft(user) {
         ONLINE.remove(user.id);
         if (!user.kicked && CLIENT.get('join') == 'on') {
             CLIENT.show({
@@ -43,10 +211,10 @@ $(function() {
                 message : user.nick + ' has left ' + (user.part || '')
             });
         }
-    });
+    }
 
     /* Trigger name change message */
-    socket.on('nick', function(info) {
+    function onNick(info) {
         var user = ONLINE.get(info.id);
         var old = user.get('nick');
         info.nick = unstyle(info.nick);
@@ -55,38 +223,38 @@ $(function() {
             type : 'general-message',
             message : old + ' is now known as ' + info.nick
         });
-    });
+    }
 
     /* Update user information */
-    socket.on('update', function(info) {
+    function onUpdate(info) {
         if (info.role == 'mute') {
             info.role = 'basic';
             info.idle = 1;
         }
         CLIENT.set(info);
-    });
+    }
 
     /* Update the large center message */
-    socket.on('centermsg', function(data) {
+    function onCenterMsg(data) {
         CLIENT.set('msg', data.msg);
-    });
+    }
 
     /* Client side check to see if user is active */
-    socket.on('alive', function() {
+    function onAlive() {
         socket.emit('alive');
-    });
+    }
 
     /* Play youtube video when activated */
-    socket.on('playvid', function(url){
+    function onPlayVid(url) {
         if(url.url == "stop" || CLIENT.get('mute') == 'on' || CLIENT.get('play') == 'off') {
             $("#youtube")[0].innerHTML = "";
         } else {
             $("#youtube")[0].innerHTML = "<iframe width=\"420\" height=\"345\" src=\"https://www.youtube.com/embed/" + url.url +"?autoplay=1\" frameborder=\"0\" allowfullscreen></iframe>";
         }
-    });
+    }
 
     /* Show messages from users that aren't blocked */
-    socket.on('message', function(msg) {
+    function onMessage(msg) {
         if (!msg.nick) {
             CLIENT.show(msg);
         } else {
@@ -97,26 +265,30 @@ $(function() {
                 CLIENT.show(msg);
             }
         }
-    });
+    }
+
+    function onUpdateMousePosition(msg) {
+        CLIENT.trigger('updateMousePosition', msg);
+    }
 
     /* Send user info after connecting to the server */
-    socket.on('connect', function() {
+    function onConnect() {
         socket.emit('join', {
             nick : CLIENT.get('nick'),
-            security : CLIENT.get('security')
+                    security : CLIENT.get('security')
         });
-    });
+    }
 
     /* Display disconnect message */
-    socket.on('disconnect', function() {
+    function onDisconnect() {
         ONLINE.reset();
         CLIENT.error('Socket connection closed');
-    });
+    }
 
     /* Refresh window on command */
-    socket.on('refresh', function() {
+    function onRefresh() {
         window.location.reload();
-    });
+    }
 
     /* Send request for topic info */
     getTopicData = function() {
@@ -130,9 +302,7 @@ $(function() {
             params : {flair : flair}
         });
     };
-    socket.on('updateMousePosition', function(msg) {
-        CLIENT.trigger('updateMousePosition', msg);
-    });
+
     /**
      * @inner
      * @param {string} name
@@ -143,7 +313,7 @@ $(function() {
         if ('pm block alert unblock unalert'.split(' ').indexOf(name) != -1 && input.trim() == ""){
             CLIENT.error('Invalid: /'+name+' <nick>');
         } else {
-        /* Simplified switch statement for client-side commands */
+            /* Simplified switch statement for client-side commands */
             switch(name) {
                 case 'pm':
                     var pm = /^(.*?[^\\])\|([\s\S]*)$/.exec(input);
@@ -209,143 +379,7 @@ $(function() {
             }
         }
     }
-
-    /* Backbone model containing functions to manage the user chat interface */
-    CLIENT = new (Backbone.Model.extend({
-        initialize : function() {
-            /* Initialize from localstorage. */
-            'color join font style mute play nick images security flair styles bg access_level role part menu_top menu_left menu_display mask frame'.split(' ').forEach(function(key) {
-                var item = localStorage.getItem('chat-' + key);
-                this.set(key, item);
-                this.on('change:' + key, function(m, value) {
-                    if (value) {
-                        localStorage.setItem('chat-' + key, value);
-                    } else {
-                        localStorage.removeItem('chat-' + key);
-                    }
-                });
-            }, this);
-
-            /* Notify when values change. */
-            'color style flair mute play images styles bg role access_level part mask frame'.split(' ').forEach(function(key) {
-                this.on('change:' + key, function(m, value) {
-                    if (value) {
-                        this.show(key + ': ' + value);
-                    } else {
-                        this.show(key + ' reset to default');
-                    }
-                }, this);
-            }, this);
-
-            /* Display message sample to user */
-            'color style font flair'.split(' ').forEach(function(key) {
-                this.on('change:' + key, function(m, value) {
-                    this.submit('/echo Now your messages look like this');
-                }, this);
-            }, this);
-        },
-
-        /* Return all valid commands */
-        getAvailableCommands : function() {
-            var myrole = this.get('role');
-            return myrole == null ? [] : _.filter(_.keys(COMMANDS), function(key) {
-                var cmd_level = COMMANDS[key].role;
-                return cmd_level == null || roles.indexOf(myrole) <= roles.indexOf(cmd_level);
-            });
-        },
-
-        /* Parse and sends message to server */
-        submit : function(input) {
-            var access_level = parseInt(this.get('access_level'));
-            var parsed = /^\/(\w+) ?([\s\S]*)/.exec(input);
-            if (access_level < 0) access_level = 3;
-            if (parsed) {
-                var specs = parsed[2];
-                var name = parsed[1].toLowerCase();
-                var cmd = COMMANDS[name];
-                if (cmd && roles.indexOf(this.get('role')) <= roles.indexOf(cmd.role || 'basic')) {
-                    var expect = cmd.params || [];
-                    var params = parseParams(name, specs, expect);
-                    if (expect.length == 0 || params) {
-                        var handler = typeof cmd == 'function' ? cmd : cmd.handler;
-                        if (handler) {
-                            handler(params);
-                        } else {
-                            socket.emit('command', {
-                                name : name,
-                                params : params
-                            });
-                        }
-                    } else {
-                        CLIENT.error('Invalid: /' + name + ' <' + expect.join('> <').replace('$', '') + '>');
-                    }
-                } else {
-                    CLIENT.error('Invalid command. Use /help for a list of commands.');
-                }
-            } else {
-                var input = this.decorate(input);
-                var flair = this.get('flair');
-                if (!this.get('idle')) {
-                    socket.emit('message', {
-                        flair : flair,
-                        message : input
-                    });
-                } else {
-                    CLIENT.show({
-                        type : 'chat-message',
-                        nick : this.get('nick'),
-                        message : input,
-                        flair : flair
-                    });
-                 }
-            }
-        },
-
-        show : function(message) {
-            this.trigger('message', message);
-        },
-
-        error : function(content) {
-            this.trigger('message', {
-                type: 'error-message',
-                message: content
-            });
-        },
-
-        /* List of invalid fonts */
-        badfonts : [],
-
-        /* Add formating to incoming text */
-        decorate : function(input) {
-            if (input.charAt(0) != '>' || input.search(/(^|[> ])>>\d+/) == 0
-            || input.search(/>>>(\/[a-z0-9]+)\/(\d+)?\/?/i) == 0) {
-                var style = this.get('style');
-                var color = this.get('color');
-                var font = this.get('font');
-                if (style) {
-                    style = style.replace(/\/\+/g, '');
-                    if(style.split('/^').length > 4){
-                        amount = style.split('/^').length;
-                        for (i = 0; i < amount - 4; i++) {
-                            style = style.replace(/\/\^/i, '');
-                        }
-                    }
-                    input = style + input;
-                }
-                input = ' ' + input;
-                color ? input = '#' + color + input + ' ' : input = input + ' ';
-                if (font) {
-                    input = '$' + font + '|' + input;
-                }
-            }
-            return input;
-        },
-
-        updateMousePosition : function(position) {
-            socket.emit('updateMousePosition', position);
-        }
-    }));
-});
+}
 
 // -----------------------------------------------------------------------------
 // Topic
@@ -461,7 +495,7 @@ $(function() {
     CLIENT.on('change:chat_style', function(m, style){
         style = CLIENT.get('chat_style').split(',');
         if (!style[2]) style[2] = '#000';
-        $('#input-bar').css('background-color', style[0]);
+              $('#input-bar').css('background-color', style[0]);
         $('#user-list').css('background-color', style[2]);
 
         if(navigator.userAgent.toLowerCase().indexOf('chrome') > -1) {
@@ -492,19 +526,19 @@ $(function() {
 
     /* Hide and show popup user menu */
     $('#tabbed-menu').click(function(){
-    	var distanceFromTop = $('#tabbed-menu').offset().top - $(window).scrollTop()
-    	if ( distanceFromTop < 350 ) {
-    	    $('#user-list').css({ top : '50px', bottom : 'auto'});
-    	}
-    	else {
+        var distanceFromTop = $('#tabbed-menu').offset().top - $(window).scrollTop()
+        if ( distanceFromTop < 350 ) {
+            $('#user-list').css({ top : '50px', bottom : 'auto'});
+        }
+        else {
             $('#user-list').css({ top : 'auto', bottom : '50px'});
-    	}
-    	$('#user-list').slideToggle();
+        }
+        $('#user-list').slideToggle();
     });
     $(document).on('focus', 'textarea', function() {// Fix for users with an OSK, such as mobile.
-    	if ($('#user-list').css('display') == 'block' && $('#user-list').css('overflow') == 'visible') {
-	    $('#user-list').slideToggle();
-    	}
+        if ($('#user-list').css('display') == 'block' && $('#user-list').css('overflow') == 'visible') {
+            $('#user-list').slideToggle();
+        }
     });
     if (CLIENT.get('menu_display')){
         $('.menu-container').css('left',CLIENT.get('menu_left'));
@@ -514,7 +548,7 @@ $(function() {
     ONLINE.on('add', function(user) {
         var li = $('<li class="users"></li>').attr({
             class : 'online-' + user.get('id'),
-            id : user.get('id')
+                                                   id : user.get('id')
         }).appendTo('.online');
         /* Limit the maximum length to be displayed */
         var nick = $('<span></span>').text(user.get('nick').substr(0,35)).appendTo(li);
@@ -523,7 +557,7 @@ $(function() {
             nick.text(user.get('nick').substr(0,35));
         });
         CLIENT.on('change:menu_display', function(e) {
-           updateCount();
+            updateCount();
         });
         updateCount();
     });
@@ -571,11 +605,11 @@ $(function() {
         items: {
             /* Removed until PM Panels are finished. */
             /*"Panel" : {
-                name: "PM Panel",
-                callback: function(){
-
-                }
-            },*/
+             *                name: "PM Panel",
+             *                callback: function(){
+             *
+        }
+        },*/
             "PM": {
                 name: "PM",
                 callback: function(){
@@ -646,12 +680,12 @@ $(function() {
         message.type = message.type || 'system-message';
         var el = buildMessage(message);
         switch (message.type) {
-        /*
-         * case 'personal-message': PM.show(message, el); break;
-         */
-        default:
-            appendMessage(el);
-            break;
+            /*
+             * case 'personal-message': PM.show(message, el); break;
+             */
+            default:
+                appendMessage(el);
+                break;
         }
     });
 
@@ -692,71 +726,71 @@ $(function() {
         /* Alert the user if their name is mentioned */
         if (((check.test(message.message.replace('\\','')) || valid) && ('chat-message action-message'.split(' ').indexOf(message.type) + 1) || message.type == 'personal-message')
             && message.nick != CLIENT.get('nick')){
-            	message.count && el.children('.timestamp').attr('class', "timestamp highlightname");
-            	sound = 'name'
-                $("#icon").attr("href","../img/icon.ico");
-        }
-        /* Alert user if they are quoted */
-        if ((message.message.search(/>>(\d)+/g) + 1) && CLIENT.get('nick') != message.nick) {// <--- Not a typo
-            var matches = message.message.match(/>>(\d)+/g);
-            for (var i = 0, j = matches.length; i < j; i++) {
-                var lastQuote = $('.spooky_msg_'+matches[i].substring(2)).last();
-                if (lastQuote.length && lastQuote.text().match(/[^:]*/i)[0] == CLIENT.get('nick')) {
-                    message.count && el.children('.timestamp').attr('class', "timestamp highlightname");
-                    sound = 'name';
-                    $("#icon").attr("href","../img/icon.ico");
+            message.count && el.children('.timestamp').attr('class', "timestamp highlightname");
+        sound = 'name'
+        $("#icon").attr("href","../img/icon.ico");
+            }
+            /* Alert user if they are quoted */
+            if ((message.message.search(/>>(\d)+/g) + 1) && CLIENT.get('nick') != message.nick) {// <--- Not a typo
+                var matches = message.message.match(/>>(\d)+/g);
+                for (var i = 0, j = matches.length; i < j; i++) {
+                    var lastQuote = $('.spooky_msg_'+matches[i].substring(2)).last();
+                    if (lastQuote.length && lastQuote.text().match(/[^:]*/i)[0] == CLIENT.get('nick')) {
+                        message.count && el.children('.timestamp').attr('class', "timestamp highlightname");
+                        sound = 'name';
+                        $("#icon").attr("href","../img/icon.ico");
+                    }
                 }
             }
-        }
-        if (message.nick && message.type != 'action-message') {
-            if (message.flair) {
-                var parsedFlair = parser.parse(message.flair);
-                if (parser.removeHTML(parsedFlair) == message.nick) {
-                    parser.getAllFonts(message.flair);
+            if (message.nick && message.type != 'action-message') {
+                if (message.flair) {
+                    var parsedFlair = parser.parse(message.flair);
+                    if (parser.removeHTML(parsedFlair) == message.nick) {
+                        parser.getAllFonts(message.flair);
+                    } else {
+                        parsedFlair = null;
+                    }
+                }
+                if (message.hat != 'nohat' && message.type == 'chat-message') {
+                    $('<span class="hat ' + message.hat + '" style="background:url(\'/css/img/hats/'+message.hat+'.png\') no-repeat center;background-size: 30px 30px;"></span>').appendTo(content);
+                }
+                if (parsedFlair) {
+                    $('<span class="nick"></span>').html(parsedFlair + ':').appendTo(content);
                 } else {
-                    parsedFlair = null;
+                    $('<span class="nick"></span>').text(message.nick + ':').appendTo(content);
                 }
             }
-            if (message.hat != 'nohat' && message.type == 'chat-message') {
-                $('<span class="hat ' + message.hat + '" style="background:url(\'/css/img/hats/'+message.hat+'.png\') no-repeat center;background-size: 30px 30px;"></span>').appendTo(content);
+            if (message.message) {
+                var parsed;
+                switch (message.type) {
+                    case 'escaped-message':
+                        parsed = $('<span></span>').text(message.message).html().replace(/\n/g, '<br/>');
+                        break;
+                    case 'personal-message':
+                    case 'chat-message':
+                        parser.getAllFonts(message.message);
+                        parsed = parser.parse(message.message);
+                        break;
+                    case 'elbot-response':
+                        parsed = message.message;
+                        break;
+                    case 'general-message':
+                    case 'note-message':
+                    case 'error-message':
+                        parsed = parser.parse(message.message);
+                        break;
+                    case 'anon-message':
+                        var name = (!CLIENT.get('role') || roles.indexOf(CLIENT.get('role'))) > 1 ? 'anon' : message.name;
+                        parsed = parser.parse( '#6464C0' + name + ': ' + message.message);
+                        break;
+                    default:
+                        parsed = parser.parseLinks(message.message);
+                        break;
+                }
+                $('<span class="content"></span>').html(parsed || message.message).appendTo(content);
             }
-            if (parsedFlair) {
-                $('<span class="nick"></span>').html(parsedFlair + ':').appendTo(content);
-            } else {
-                $('<span class="nick"></span>').text(message.nick + ':').appendTo(content);
-            }
-        }
-        if (message.message) {
-            var parsed;
-            switch (message.type) {
-                case 'escaped-message':
-                    parsed = $('<span></span>').text(message.message).html().replace(/\n/g, '<br/>');
-                    break;
-                case 'personal-message':
-                case 'chat-message':
-                    parser.getAllFonts(message.message);
-                    parsed = parser.parse(message.message);
-                    break;
-                case 'elbot-response':
-                    parsed = message.message;
-                    break;
-                case 'general-message':
-                case 'note-message':
-                case 'error-message':
-                    parsed = parser.parse(message.message);
-                    break;
-                case 'anon-message':
-                    var name = (!CLIENT.get('role') || roles.indexOf(CLIENT.get('role'))) > 1 ? 'anon' : message.name;
-                    parsed = parser.parse( '#6464C0' + name + ': ' + message.message);
-                    break;
-                default:
-                    parsed = parser.parseLinks(message.message);
-                    break;
-            }
-            $('<span class="content"></span>').html(parsed || message.message).appendTo(content);
-        }
-        playAudio(sound);
-        return el;
+            playAudio(sound);
+            return el;
     }
 
     window.scrollToBottom = function() {
@@ -808,33 +842,33 @@ $('#messages').on('click', '.message .timestamp', function(e){
                 $(panel).append('<div id="PM-wrap"><span>' + message.nick + ': </span>' + '<span>' + parser.parse(message.message) + '</span></div>');
             }
         },
-        create : function(id) {
-            var pan = $('<div>');
-            $('body').append(pan);
-            $(pan).attr({
-                id : 'panel-' + id,
-                title : 'PM: ' + ONLINE.get(id).get('nick')
-            });
-            $(pan).css({
-               position: 'absolute',
-               width: '200px',
-               height: '200px',
-               backgroundColor: 'black',
-               zIndex: '50'
-            }).draggable().resizable();
+ create : function(id) {
+     var pan = $('<div>');
+     $('body').append(pan);
+     $(pan).attr({
+         id : 'panel-' + id,
+         title : 'PM: ' + ONLINE.get(id).get('nick')
+     });
+     $(pan).css({
+         position: 'absolute',
+         width: '200px',
+         height: '200px',
+         backgroundColor: 'black',
+         zIndex: '50'
+     }).draggable().resizable();
 
-            $(pan).html('<div style="position:absolute;right:0;color:red;" onclick="$(\'#panel-'+id+'\').remove();">X</div><div class="pm-messages" style="width:100%;height:calc(100% - 48px);color:white;"></div></div><div id="input-bar"><div><input id="input-message" style="width:100%"></input></div></div>');
+     $(pan).html('<div style="position:absolute;right:0;color:red;" onclick="$(\'#panel-'+id+'\').remove();">X</div><div class="pm-messages" style="width:100%;height:calc(100% - 48px);color:white;"></div></div><div id="input-bar"><div><input id="input-message" style="width:100%"></input></div></div>');
 
-            var input = $('#panel-' + id + ' input');
-            $(input).keydown(function(e){
-                if (e.keyCode == 13){
-                   CLIENT.submit('/pm ' + ONLINE.get(id).get('nick') + '|' + $(input).val());
-                   $(input).val('');
-                }
-            });
-            PANELS[ONLINE.get(id).get('nick')] = pan.find('.pm-messages');
-            console.log(PANELS)
-        }
+     var input = $('#panel-' + id + ' input');
+     $(input).keydown(function(e){
+         if (e.keyCode == 13){
+             CLIENT.submit('/pm ' + ONLINE.get(id).get('nick') + '|' + $(input).val());
+             $(input).val('');
+         }
+     });
+     PANELS[ONLINE.get(id).get('nick')] = pan.find('.pm-messages');
+     console.log(PANELS)
+ }
     };
 })();
 
@@ -849,7 +883,7 @@ $(function() {
             var i = color.lastIndexOf('#');
             i >= 0 ? textColor = color.substring(i + 1) : textColor = color;
             if (/([a-f]{6}|[a-f]{3})/i.test(textColor))
-            	textColor = '#' + textColor;
+                textColor = '#' + textColor;
         } else {
             textColor = '#888';
         }
@@ -893,29 +927,29 @@ $(function() {
     var input = $('#input-message').keydown(function(e) {
         var delta = 0;
         switch (e.keyCode) {
-        case 13: // enter
-            if (!e.shiftKey) {
-                e.preventDefault();
-                var text = input.val();
-                text && submit();
-                historyIndex = -1;
-                history.push(text);
-            }
-            return;
-        case 38: // up
-            if(e.shiftKey){
-                if ($(this).val().indexOf('\n') == -1 || $(this)[0].selectionStart < $(this).val().indexOf('\n')) {
-                    delta = 1;
+            case 13: // enter
+                if (!e.shiftKey) {
+                    e.preventDefault();
+                    var text = input.val();
+                    text && submit();
+                    historyIndex = -1;
+                    history.push(text);
                 }
-            }
-            break;
-        case 40: // down
-            if(e.shiftKey){
-                if ($(this)[0].selectionStart > $(this).val().lastIndexOf('\n')) {
-                    delta = -1;
+                return;
+            case 38: // up
+                if(e.shiftKey){
+                    if ($(this).val().indexOf('\n') == -1 || $(this)[0].selectionStart < $(this).val().indexOf('\n')) {
+                        delta = 1;
+                    }
                 }
-            }
-            break;
+                break;
+            case 40: // down
+                if(e.shiftKey){
+                    if ($(this)[0].selectionStart > $(this).val().lastIndexOf('\n')) {
+                        delta = -1;
+                    }
+                }
+                break;
         }
         if (delta) {
             historyIndex = Math.max(0, Math.min(history.length - 1, historyIndex + delta));
@@ -977,377 +1011,377 @@ $(function() {
     window.COMMANDS = {
         help : function() {
             CLIENT.show({
-            	type : 'system-message',
+                type : 'system-message',
                 message : 'Available Commands: /' + CLIENT.getAvailableCommands().join(', /')
             });
         },
-        nick : {
-            params : [ 'nick$' ]
-        },
-        me : {
-            params : [ 'message$' ]
-        },
-        login : {
-            params : [ 'password', 'nick$' ]
-        },
-        register : {
-            params : [ 'initial_password' ]
-        },
-        change_password : {
-            params : [ 'old_password', 'new_password' ]
-        },
-        banlist : {
-            role : 'admin'
-        },
-        permabanlist : {
-            role : 'admin'
-        },
-        find : {
-            role : 'admin',
-            params : [ 'remote_addr' ]
-        },
-        permaban : {
-            role : 'admin',
-            params : [ 'nick[|message]' ]
-        },
-        unpermaban : {
-            role : 'admin',
-            params : [ 'id$' ]
-        },
-        purge : {
-            role : 'admin'
-        },
-        ban : {
-            role : 'admin',
-            params : [ 'nick[|message]' ]
-        },
-        unban : {
-            role : 'admin',
-            params : [ 'id$' ]
-        },
-        unban_all : {
-            role : 'god'
-        },
-        banip : {
-            role : 'admin',
-            params : [ 'nick$' ]
-        },
-        kick : {
-            role : 'mod',
-            params : [ 'nick[|message]' ]
-        },
-        access : {
-            role : 'admin',
-            params : [ 'role', 'access_level', 'nick$' ]
-        },
-        access_global : {
-            role : 'god',
-            params : [ 'access_level', 'nick$' ]
-        },
-        whois : {
-            params : [ 'nick$' ]
-        },
-        findalt : {
-            role : 'super',
-            params : [ 'nick$' ]
-        },
-        topic : {
-            role : 'mod',
-            params : [ 'topic$' ]
-        },
-        note : {
-            role : 'admin',
-            params : [ 'message$' ]
-        },
-        clear : function() {
-            /* Clear #messages and add back the msg */
-            $('#messages').empty().append("<table id='sam'><tr><td id='content'></td></tr></table>");
-        },
-        unmute : function() {
-            CLIENT.set('mute', 'off');
-        },
-        mute : function() {
-            CLIENT.set('mute', 'on');
-        },
-        style : {
-            params : [ 'style$' ],
-            handler : function(params) {
-                var test = params.style;
-                CLIENT.set('style', [test][+ (test == 'default' || test == 'none')]);
-            }
-        },
-        font : {
-            params : [ 'font$' ],
-            handler : function(params) {
-                var old = CLIENT.get('font');
-                if (params.font == 'default' || params.font == 'none') {
-                    CLIENT.unset('font');
-                } else if (CLIENT.badfonts.indexOf(params.font) < 0) {
-                    $.ajax({
-                        url : 'https://fonts.googleapis.com/css?family=' + encodeURIComponent(params.font),
-                        success : function(){CLIENT.set('font', params.font);},
-                        error : function(){CLIENT.badfonts.push(params.font);CLIENT.error('That is not a valid font');}
-                    });
-                }
-            }
-        },
-        color : {
-            params : [ 'color' ],
-            handler : function(params) {
-                if (params.color == 'default' || params.color == 'none') {
-                    CLIENT.set('color', null);
-                } else if (parser.isColor(params.color)){
-                    CLIENT.set('color', params.color);
-                } else {
-                    CLIENT.error('I don\'t think that is a color. http://en.wikipedia.org/wiki/Web_colors');
-                }
-            }
-        },
-        flair : {
-            role: 'basic',
-            params : [ 'flair$' ],
-            handler : function(params) {
-                if (params.flair == 'default' || params.flair == 'none') {
-                    flair = null;
-                }
-                flair = params.flair.replace(/&/g, '\\&')
-                sendFlair(flair);
-                CLIENT.set('flair', flair);
-            }
-        },
-        echo : {
-            params : [ 'message$' ],
-            handler : function(params) {
-                CLIENT.show({
-                    type : 'chat-message',
-                    nick : CLIENT.get('nick'),
-                    message : CLIENT.decorate(params.message),
-                    flair : CLIENT.get('flair')
-                });
-            }
-        },
-        pm : {
-            params : [ 'nick|message' ]
-        },
-        r : {
-            params : [ 'message$' ],
-            handler : function(params){
-            	var last = CLIENT.lastNick;
-                if (last){
-                    CLIENT.submit("/pm "+last+"|"+params.message);
-                } else {
-                    CLIENT.error('You have not PMed anyone yet')
-                }
-            }
-        },
-        refresh : {role : 'super'},
-        bg : {
-            role : 'mod',
-            params : [ 'theme_style$' ]
-        },
-        theme : {
-            role : 'mod',
-            params : [ 'input_style', 'scrollbar_style', 'menu_style' ]
-        },
-        reset : {
-            role : 'super',
-            params : [ 'nick$' ]
-        },
-        get : {
-            params : [ 'attribute' ],
-            handler : function(params) {
-                var attribute = params.attribute;
-                var valid = 'theme color font style flair mute play images note topic styles bg part block background mask msg alert security frame frame_src join'.split(' ');
-                if (valid.indexOf(attribute) > -1) {
-                    switch (attribute) {
-                        case 'note':
-                            attribute = 'notification';
-                            break;
-                        case 'bg':
-                            attribute = 'background';
-                            break;
-                        case 'topic':
-                            getTopicData();
-                    }
-                    if (attribute == 'theme') {
-                        var input_msg_clr = $("#input-bar").css('backgroundColor');
-                        var scroll_bar_clr = $(".scrollbar_default").css('backgroundColor');
-                        var user_list_clr = $("#user-list").css('backgroundColor');
+ nick : {
+     params : [ 'nick$' ]
+ },
+ me : {
+     params : [ 'message$' ]
+ },
+ login : {
+     params : [ 'password', 'nick$' ]
+ },
+ register : {
+     params : [ 'initial_password' ]
+ },
+ change_password : {
+     params : [ 'old_password', 'new_password' ]
+ },
+ banlist : {
+     role : 'admin'
+ },
+ permabanlist : {
+     role : 'admin'
+ },
+ find : {
+     role : 'admin',
+ params : [ 'remote_addr' ]
+ },
+ permaban : {
+     role : 'admin',
+ params : [ 'nick[|message]' ]
+ },
+ unpermaban : {
+     role : 'admin',
+ params : [ 'id$' ]
+ },
+ purge : {
+     role : 'admin'
+ },
+ ban : {
+     role : 'admin',
+ params : [ 'nick[|message]' ]
+ },
+ unban : {
+     role : 'admin',
+ params : [ 'id$' ]
+ },
+ unban_all : {
+     role : 'god'
+ },
+ banip : {
+     role : 'admin',
+ params : [ 'nick$' ]
+ },
+ kick : {
+     role : 'mod',
+ params : [ 'nick[|message]' ]
+ },
+ access : {
+     role : 'admin',
+ params : [ 'role', 'access_level', 'nick$' ]
+ },
+ access_global : {
+     role : 'god',
+ params : [ 'access_level', 'nick$' ]
+ },
+ whois : {
+     params : [ 'nick$' ]
+ },
+ findalt : {
+     role : 'super',
+ params : [ 'nick$' ]
+ },
+ topic : {
+     role : 'mod',
+ params : [ 'topic$' ]
+ },
+ note : {
+     role : 'admin',
+ params : [ 'message$' ]
+ },
+ clear : function() {
+     /* Clear #messages and add back the msg */
+     $('#messages').empty().append("<table id='sam'><tr><td id='content'></td></tr></table>");
+ },
+ unmute : function() {
+     CLIENT.set('mute', 'off');
+ },
+ mute : function() {
+     CLIENT.set('mute', 'on');
+ },
+ style : {
+     params : [ 'style$' ],
+ handler : function(params) {
+     var test = params.style;
+     CLIENT.set('style', [test][+ (test == 'default' || test == 'none')]);
+ }
+ },
+ font : {
+     params : [ 'font$' ],
+ handler : function(params) {
+     var old = CLIENT.get('font');
+     if (params.font == 'default' || params.font == 'none') {
+         CLIENT.unset('font');
+     } else if (CLIENT.badfonts.indexOf(params.font) < 0) {
+         $.ajax({
+             url : 'https://fonts.googleapis.com/css?family=' + encodeURIComponent(params.font),
+                success : function(){CLIENT.set('font', params.font);},
+                error : function(){CLIENT.badfonts.push(params.font);CLIENT.error('That is not a valid font');}
+         });
+     }
+ }
+ },
+ color : {
+     params : [ 'color' ],
+ handler : function(params) {
+     if (params.color == 'default' || params.color == 'none') {
+         CLIENT.set('color', null);
+     } else if (parser.isColor(params.color)){
+         CLIENT.set('color', params.color);
+     } else {
+         CLIENT.error('I don\'t think that is a color. http://en.wikipedia.org/wiki/Web_colors');
+     }
+ }
+ },
+ flair : {
+     role: 'basic',
+ params : [ 'flair$' ],
+ handler : function(params) {
+     if (params.flair == 'default' || params.flair == 'none') {
+         flair = null;
+     }
+     flair = params.flair.replace(/&/g, '\\&')
+     sendFlair(flair);
+     CLIENT.set('flair', flair);
+ }
+ },
+ echo : {
+     params : [ 'message$' ],
+ handler : function(params) {
+     CLIENT.show({
+         type : 'chat-message',
+         nick : CLIENT.get('nick'),
+                 message : CLIENT.decorate(params.message),
+                 flair : CLIENT.get('flair')
+     });
+ }
+ },
+ pm : {
+     params : [ 'nick|message' ]
+ },
+ r : {
+     params : [ 'message$' ],
+ handler : function(params){
+     var last = CLIENT.lastNick;
+     if (last){
+         CLIENT.submit("/pm "+last+"|"+params.message);
+     } else {
+         CLIENT.error('You have not PMed anyone yet')
+     }
+ }
+ },
+ refresh : {role : 'super'},
+ bg : {
+     role : 'mod',
+ params : [ 'theme_style$' ]
+ },
+ theme : {
+     role : 'mod',
+ params : [ 'input_style', 'scrollbar_style', 'menu_style' ]
+ },
+ reset : {
+     role : 'super',
+ params : [ 'nick$' ]
+ },
+ get : {
+     params : [ 'attribute' ],
+ handler : function(params) {
+     var attribute = params.attribute;
+     var valid = 'theme color font style flair mute play images note topic styles bg part block background mask msg alert security frame frame_src join'.split(' ');
+     if (valid.indexOf(attribute) > -1) {
+         switch (attribute) {
+             case 'note':
+                 attribute = 'notification';
+                 break;
+             case 'bg':
+                 attribute = 'background';
+                 break;
+             case 'topic':
+                 getTopicData();
+         }
+         if (attribute == 'theme') {
+             var input_msg_clr = $("#input-bar").css('backgroundColor');
+             var scroll_bar_clr = $(".scrollbar_default").css('backgroundColor');
+             var user_list_clr = $("#user-list").css('backgroundColor');
 
-                        function rgb2hex(rgb) {
-                            rgb = rgb.substring(4, rgb.length-1).split(", ");
-                            function colorChange(color) {
-                                var color = parseInt(color).toString(16);
-                                return ['', '0'][+ (color.length < 2)] + color;
-                            }
+             function rgb2hex(rgb) {
+                 rgb = rgb.substring(4, rgb.length-1).split(", ");
+                 function colorChange(color) {
+                     var color = parseInt(color).toString(16);
+                     return ['', '0'][+ (color.length < 2)] + color;
+                 }
 
-                            var red = colorChange(rgb[0]);
-                            var green = colorChange(rgb[1]);
-                            var blue = colorChange(rgb[2]);
-                            return "#"+red+green+blue;
-                        }
-                        theme_setting = rgb2hex(input_msg_clr) + " " +
-    			        rgb2hex(scroll_bar_clr)+ " " +
-    			        rgb2hex(user_list_clr) + " ";
+                 var red = colorChange(rgb[0]);
+                 var green = colorChange(rgb[1]);
+                 var blue = colorChange(rgb[2]);
+                 return "#"+red+green+blue;
+             }
+             theme_setting = rgb2hex(input_msg_clr) + " " +
+             rgb2hex(scroll_bar_clr)+ " " +
+             rgb2hex(user_list_clr) + " ";
 
-                        CLIENT.show({
-                            type : 'system-message',
-                            message : "Theme is currently set to: " + theme_setting
-                        });
-                        /*\
-                        |*| I had to do this because of some genius bloat
-                        |*| code one of you goof balls wrote long ago.  <3
-                        \*/
-                    } else {
-                        var att = CLIENT.get(attribute)|| 'none';
-                        if ((attribute == 'block' || attribute == 'alert') && !att.length) att = '[]';
-                        CLIENT.show({
-                            type : 'escaped-message',
-                            message : params.attribute + ' is currently set to: ' + att
-                        });
-                    }
-                } else {
-                    CLIENT.error('Invalid: Variable can be one of [' + valid.join(', ') + ']');
-                }
-            }
-        },
-        elbot : {
-            params : [ 'message$' ]
-        },
-        anon : {
-            params : [ 'message$' ]
-        },
-        part : {
-            params : [ 'message$' ]
-        },
-        toggle : {
-            params : [ 'att' ],
-            handler : function(params) {
-                var att = params.att;
-                var toggled;
-                switch (att) {
-                    case 'bg':
-                        toggled = 'bg'
-                        break;
-                    case 'join':
-                    case 'leave':
-                        var join_off = (CLIENT.get('join') == 'off');
-                        CLIENT.show('Join and leave mesages ' + (join_off ? 'enabled' : 'disabled'));
-                        toggled = 'join';
-                        break;
-                    default:
-                        if (att != 'style' && att != 'font') toggled = att;
-                }
-                CLIENT.set(toggled, ['on', 'off'][+ (CLIENT.get(toggled) == 'on')]);
-            }
-        },
-        private : {
-            role : 'super'
-        },
-        public : {
-            role : 'super'
-        },
-        invite : {
-            role : 'super',
-            params : [ 'nick$' ]
-        },
-        uninvite : {
-            role : 'super',
-            params : [ 'nick$' ]
-        },
-        whitelist : {
-            role : 'super'
-        },
-        play : {
-            role : 'super',
-            params : [ 'url' ]
-        },
-        safe : function(){
-            CLIENT.set({
-                bg: 'off',
-                images: 'off',
-                frame: 'off'
-            });
-        },
-        unsafe : function(){
-            CLIENT.set({
-                bg: 'on',
-                images: 'on',
-                frame: 'on'
-            });
-        },
-        msg : {
-            params : [ 'message$' ]
-        },
-        mask : {
-            params : [ 'vHost' ]
-        },
-        pingall : {
-        	role : 'super'
-        },
-        global : {
-            role : 'super',
-            params : [ 'message' ]
-        },
-        lock : {
-            role : 'admin',
-            params : [ 'command', 'role', 'access_level' ]
-        },
-        user_list : {
-            role : 'mod'
-        },
-        frame : {
-            role : 'super',
-            params : [ 'url' ]
-        },
-        channels : {
-            role : 'super'
-        },
-        cam : function(){
-            video('event', 'embed', 'http://162.219.26.75:12202/spooks')
-        },
-        define : {
-            params : [ 'message$' ]
-        },
-        coinflip : {
+             CLIENT.show({
+                 type : 'system-message',
+                 message : "Theme is currently set to: " + theme_setting
+             });
+             /*\
+              *                        |*| I had to do this because of some genius bloat
+              *                        |*| code one of you goof balls wrote long ago.  <3
+              *                        \*/
+         } else {
+             var att = CLIENT.get(attribute)|| 'none';
+             if ((attribute == 'block' || attribute == 'alert') && !att.length) att = '[]';
+ CLIENT.show({
+     type : 'escaped-message',
+     message : params.attribute + ' is currently set to: ' + att
+ });
+         }
+     } else {
+         CLIENT.error('Invalid: Variable can be one of [' + valid.join(', ') + ']');
+     }
+ }
+ },
+ elbot : {
+     params : [ 'message$' ]
+ },
+ anon : {
+     params : [ 'message$' ]
+ },
+ part : {
+     params : [ 'message$' ]
+ },
+ toggle : {
+     params : [ 'att' ],
+ handler : function(params) {
+     var att = params.att;
+     var toggled;
+     switch (att) {
+         case 'bg':
+             toggled = 'bg'
+             break;
+         case 'join':
+         case 'leave':
+             var join_off = (CLIENT.get('join') == 'off');
+             CLIENT.show('Join and leave mesages ' + (join_off ? 'enabled' : 'disabled'));
+             toggled = 'join';
+             break;
+         default:
+             if (att != 'style' && att != 'font') toggled = att;
+     }
+     CLIENT.set(toggled, ['on', 'off'][+ (CLIENT.get(toggled) == 'on')]);
+ }
+ },
+ private : {
+     role : 'super'
+ },
+ public : {
+     role : 'super'
+ },
+ invite : {
+     role : 'super',
+ params : [ 'nick$' ]
+ },
+ uninvite : {
+     role : 'super',
+ params : [ 'nick$' ]
+ },
+ whitelist : {
+     role : 'super'
+ },
+ play : {
+     role : 'super',
+ params : [ 'url' ]
+ },
+ safe : function(){
+     CLIENT.set({
+         bg: 'off',
+         images: 'off',
+         frame: 'off'
+     });
+ },
+ unsafe : function(){
+     CLIENT.set({
+         bg: 'on',
+         images: 'on',
+         frame: 'on'
+     });
+ },
+ msg : {
+     params : [ 'message$' ]
+ },
+ mask : {
+     params : [ 'vHost' ]
+ },
+ pingall : {
+     role : 'super'
+ },
+ global : {
+     role : 'super',
+ params : [ 'message' ]
+ },
+ lock : {
+     role : 'admin',
+ params : [ 'command', 'role', 'access_level' ]
+ },
+ user_list : {
+     role : 'mod'
+ },
+ frame : {
+     role : 'super',
+ params : [ 'url' ]
+ },
+ channels : {
+     role : 'super'
+ },
+ cam : function(){
+     video('event', 'embed', 'http://162.219.26.75:12202/spooks')
+ },
+ define : {
+     params : [ 'message$' ]
+ },
+ coinflip : {
 
-        },
-        hat : {
-            params : [ 'hat' ]
-        },
-        hata : {
-            role: 'super',
-            params : [ 'nick$', 'hat' ]
-        },
-        hatr : {
-            role : 'super',
-            params : [ 'nick$', 'hat' ]
-        },
-        hatc : {
-            role : 'super',
-            params : [ 'nick$', 'hat' ]
-        },
-        warn : {
-            role : 'super'
-        },
-        e : { //Popup Embed
-            role : 'super',
-            params : [ 'url' ],
-            handler : function(params) {
-                var url = params.url
-                if (url.substring(0, 4) !== 'http'){
-                    var url = 'http://' + params.url
-                } else {
-                    video('event', 'embed', url);
-                }
-            }
-        }
+ },
+ hat : {
+     params : [ 'hat' ]
+ },
+ hata : {
+     role: 'super',
+ params : [ 'nick$', 'hat' ]
+ },
+ hatr : {
+     role : 'super',
+ params : [ 'nick$', 'hat' ]
+ },
+ hatc : {
+     role : 'super',
+ params : [ 'nick$', 'hat' ]
+ },
+ warn : {
+     role : 'super'
+ },
+ e : { //Popup Embed
+     role : 'super',
+ params : [ 'url' ],
+ handler : function(params) {
+     var url = params.url
+     if (url.substring(0, 4) !== 'http'){
+         var url = 'http://' + params.url
+     } else {
+         video('event', 'embed', url);
+     }
+ }
+ }
     };
 
     var command_data = {
         blank : [['logout', 'unregister', 'whoami'],//Server
-        ['block', 'unblock', 'alert', 'unalert']],//Client
-        options : [{}, function(){}]
+ ['block', 'unblock', 'alert', 'unalert']],//Client
+ options : [{}, function(){}]
     };
 
     /* Initialize all empty objects */
@@ -1418,7 +1452,7 @@ parser = {
             $.ajax({
                 url : url,
                 success : function(){$('<link rel="stylesheet" href="' + url + '">').appendTo('head');},
-                error: function(){CLIENT.badfonts.push(family);}
+                   error: function(){CLIENT.badfonts.push(family);}
             });
         }
     },
@@ -1435,18 +1469,18 @@ parser = {
     },
     convertToHTML : function(str) {
         str = str.replace(/\n/g, '\\n')
-            .replace(/&/gi, '&amp;')
-            .replace(/>/gi, '&gt;')
-            .replace(/</gi, '&lt;')
-            .replace(/"/gi, '&quot;')
-            .replace(/#/gi, '&#35;')
+        .replace(/&/gi, '&amp;')
+        .replace(/>/gi, '&gt;')
+        .replace(/</gi, '&lt;')
+        .replace(/"/gi, '&quot;')
+        .replace(/#/gi, '&#35;')
         /* Codes containing hashtags go below */
-            .replace(/\$/gi, '&#36;')
-            .replace(/'/gi, '&#39;')
-            .replace(/~/gi, '&#126;')
-            .replace(/\\\\n/g, this.repslsh)
-            .replace(/\\n/g, '<br />')
-            .replace(this.repslsh, '\\\\n');
+        .replace(/\$/gi, '&#36;')
+        .replace(/'/gi, '&#39;')
+        .replace(/~/gi, '&#126;')
+        .replace(/\\\\n/g, this.repslsh)
+        .replace(/\\n/g, '<br />')
+        .replace(this.repslsh, '\\\\n');
         return str;
     },
     parseLinks : function(str) {
@@ -1503,22 +1537,22 @@ parser = {
         str = str.replace(this.linkreg, function(match, p1){if (p1) {return match;} else {return '<a target="_blank" href="' + match + '">' + match + '</a>';}});
         /* Filter out embed links (Temporarily Disabled) */
         /*
-        str = str.replace(/(\\*)\/embed (\S*)/g, function(match, p1, p2){
-            var matching = p2.match(this.linkreg);
-            if (p1.length == 0 && (matching.length > 1 || matching[0] != "")) {
-                    return '<a target=\"_blank\" href=\"'+p2+'\">'+p2+'</a> <a target=\"_blank\" onclick=\"video(\'\', \'embed\', \''+p2+'\')\">[embed]</a>';
-            } else {
-                return match;
-            }
-        });*/
+         *        str = str.replace(/(\\*)\/embed (\S*)/g, function(match, p1, p2){
+         *            var matching = p2.match(this.linkreg);
+         *            if (p1.length == 0 && (matching.length > 1 || matching[0] != "")) {
+         *                    return '<a target=\"_blank\" href=\"'+p2+'\">'+p2+'</a> <a target=\"_blank\" onclick=\"video(\'\', \'embed\', \''+p2+'\')\">[embed]</a>';
+    } else {
+        return match;
+    }
+    });*/
 
         /* Word Filters */
         str = str.replace(/awakens/gi, 'the shitty chat')
-    			 .replace(/vegan/gi, 'terrorist')
-    			 .replace(/fortran/gi, 'F O R T R A N')
-    			 
-    			 .replace(/iplogger\.org/gi, 'I am a big fat faggot please rape my face')
-    			 .replace(/2no\.co/gi, 'I am a big fat faggot please rape my face');
+        .replace(/vegan/gi, 'terrorist')
+        .replace(/fortran/gi, 'F O R T R A N')
+
+        .replace(/iplogger\.org/gi, 'I am a big fat faggot please rape my face')
+        .replace(/2no\.co/gi, 'I am a big fat faggot please rape my face');
 
         /* Remove replacement codes */
         str = str.replace(RegExp(this.replink, 'g'), '');
@@ -1552,14 +1586,14 @@ parser = {
         function scrollHTML(str1, str2){return '<a onmouseenter = "var quoteDiv = document.createElement(\x27div\x27); quoteDiv.setAttribute(\x27id\x27,\x27quoteDiv\x27); quoteDiv.setAttribute(\x27style\x27,\x27visibility:hidden\x27); setTimeout(function(){$(\x27#quoteDiv\x27).css(\x27visibility\x27,\x27visible\x27);},50); $(\x27#messages\x27).prepend(quoteDiv); $(\x27#quoteDiv\x27).css(\x27position\x27,\x27fixed\x27); $(\x27#quoteDiv\x27).css(\x27z-index\x27,\x275\x27); if (x == undefined){var x = $(document).mousemove(function(e){mouseX = e.pageX; mouseY = e.pageY})} if (quoteDiv != undefined){var msgClone = $(\x27.spooky_msg_'+str2+'\x27).last().parent().clone(); msgClone.children(\x27.message-content\x27).attr(\x27class\x27,\x27message-content msg_quote_'+str2+'\x27); msgClone.find(\x27img\x27).attr(\x27onload\x27,\x27\x27); msgClone.appendTo(\x27#quoteDiv\x27);}if ($(\x27#quoteDiv\x27).height() + mouseY + '+barWidth+' < window.innerHeight){$(\x27#quoteDiv\x27).css({left:mouseX + 30,top:mouseY})}else{$(\x27#quoteDiv\x27).css({left:mouseX + 30,top:window.innerHeight - '+barWidth+' - $(\x27#quoteDiv\x27).height()})}" onmousemove = "if ($(\x27#quoteDiv\x27).height() + mouseY + '+barWidth+' < window.innerHeight){$(\x27#quoteDiv\x27).css({left:mouseX + 30,top:mouseY})}else{$(\x27#quoteDiv\x27).css({left:mouseX + 30,top:window.innerHeight - '+barWidth+' - $(\x27#quoteDiv\x27).height()})}" onmouseout = "$(\x27#quoteDiv\x27).remove();" onclick = "$(\x27#messages\x27).animate({scrollTop: $(\x27.spooky_msg_'+str2+'\x27).last().offset().top - $(\x27#messages\x27).offset().top + $(\x27#messages\x27).scrollTop()},\x27normal\x27,function(){$(\x27.spooky_msg_'+str2+'\x27).last().animate({\x27background-color\x27:\x27rgb(255, 255, 255,0.8)\x27},400,function(){$(\x27.spooky_msg_'+str2+'\x27).last().animate({\x27background-color\x27:\x27transparent\x27},400)});});"><u>'+str1+'</u></a>';}
         function invalidHTML(str){return '<div style = "color: #AD0000">'+str+'</div>';}
         if (/(^|[> ])&gt;&gt;\d+/.test(str)) {
-	    str = str.replace(/(&gt;&gt;(\d+))/gi, function(match, p1, p2) {
-	        var cut = parseInt(p2);
-	        if ($('.spooky_msg_'+cut).length && cut) {
-	            return scrollHTML(p1, cut);
-	        } else {
-	            return invalidHTML(p1);
-	        }
-	    });
+            str = str.replace(/(&gt;&gt;(\d+))/gi, function(match, p1, p2) {
+                var cut = parseInt(p2);
+                if ($('.spooky_msg_'+cut).length && cut) {
+                    return scrollHTML(p1, cut);
+                } else {
+                    return invalidHTML(p1);
+                }
+            });
         }
         /* Add greentext */
         str = str.replace(/^(&gt;.*)$/i, '&#35;789922 $1');
@@ -1595,18 +1629,18 @@ parser = {
         /* Embed videos */
         if (str.search(/(youtu(\.)?be)/gi) != -1)
             str = str.replace(/<a [^>]*href="[^"]*(?:youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?"]*)[^"]*">([^<]*)<\/a>/gi, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'youtube\', \'$1\')" class="show-video">[video]</a>');
-            str = str.replace(/<a [^>]*href="[^"]*vimeo.com\/(\d+)">([^<]*)<\/a>/, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'vimeo\', \'$1\')" class="show-video">[video]</a>');
-            str = str.replace(/<a [^>]*href="[^"]*liveleak.com\/ll_embed\?f=(\w+)">([^<]*)<\/a>/, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'liveleak\', \'$1\')" class="show-video">[video]</a>');
-            str = str.replace(/<a [^>]*href="([^'"]*\.webm)">([^<]*)<\/a>/i, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'html5\', \'$1\')" class="show-video">[video]</a>');
-            str = str.replace(/<a [^>]*href="([^'"]*\.mp4)">([^<]*)<\/a>/i, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'html5\', \'$1\')" class="show-video">[video]</a>');
-            str = str.replace(/<a [^>]*href="[^"]*ustream.tv\/embed\/(\d+)\?v=3&amp;wmode=direct">([^<]*)<\/a>/, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'ustream\', \'$1\')" class="show-video">[video]</a>');
+        str = str.replace(/<a [^>]*href="[^"]*vimeo.com\/(\d+)">([^<]*)<\/a>/, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'vimeo\', \'$1\')" class="show-video">[video]</a>');
+        str = str.replace(/<a [^>]*href="[^"]*liveleak.com\/ll_embed\?f=(\w+)">([^<]*)<\/a>/, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'liveleak\', \'$1\')" class="show-video">[video]</a>');
+        str = str.replace(/<a [^>]*href="([^'"]*\.webm)">([^<]*)<\/a>/i, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'html5\', \'$1\')" class="show-video">[video]</a>');
+        str = str.replace(/<a [^>]*href="([^'"]*\.mp4)">([^<]*)<\/a>/i, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'html5\', \'$1\')" class="show-video">[video]</a>');
+        str = str.replace(/<a [^>]*href="[^"]*ustream.tv\/embed\/(\d+)\?v=3&amp;wmode=direct">([^<]*)<\/a>/, '<a target="_blank" href="$2">$2</a> <a href="javascript:void(0)" onclick="video(event, \'ustream\', \'$1\')" class="show-video">[video]</a>');
         //    str = str.replace(/<a [^>]*href="[^"]*[i.]?imgur.com\/([A-Za-z]*\.gifv)[^<]*<\/a>/i, '<iframe allowfullscreen="" frameborder="0" scrolling="no" style="max-width: 200px; max-height: 200px;" src="http://$1#embed"></iframe>');
         /* Embed audio */
-            str = str.replace(/<a [^>]*href="([^'"]*\.(mp3|wav|ogg|mid|flac))">([^<]*)<\/a>/i, '<a target="_blank" href="$1">$1</a> <a href="javascript:void(0)" onclick="video(event, \'audio\', \'$1\')" class="show-video">[audio]</a>');
+        str = str.replace(/<a [^>]*href="([^'"]*\.(mp3|wav|ogg|mid|flac))">([^<]*)<\/a>/i, '<a target="_blank" href="$1">$1</a> <a href="javascript:void(0)" onclick="video(event, \'audio\', \'$1\')" class="show-video">[audio]</a>');
         /* Parse spaces */
-            escs = str.match(/<[^>]+?>/gi);
-            str = str.replace(/<[^>]+?>/gi, this.repslsh);
-            str = str.replace(/\s{2}/gi, ' &nbsp;');
+        escs = str.match(/<[^>]+?>/gi);
+        str = str.replace(/<[^>]+?>/gi, this.repslsh);
+        str = str.replace(/\s{2}/gi, ' &nbsp;');
         for (i in escs)
             str = str.replace(this.repslsh, escs[i]);
         return str;
@@ -1632,7 +1666,7 @@ $(function() {
             var $this = $(this);
             $this.css('width', $(window).width() + 'px');
         });
-	    scrollToBottom();
+        scrollToBottom();
     }
     resize();
     $(window).resize(resize); // Add event listener to window
@@ -1648,13 +1682,13 @@ $(function() {
     $('#input-message').keydown(function(e) {
         var value = $(this).val();
         if (e.keyCode == 9 && value.substr(0,1) == '/' && value.split(' ').length == 1) {
-    	    e.preventDefault();
-    	    var roles = ['god','super','admin','mod','basic','mute'];
+            e.preventDefault();
+            var roles = ['god','super','admin','mod','basic','mute'];
             var ur_role = CLIENT.get('role');
             var possible = _.filter(_.keys(COMMANDS), function(key) {
                 var cmd_level = COMMANDS[key].role;
                 return key.indexOf(value.substring(1,20)) == 0 &&
-(cmd_level == null || roles.indexOf(ur_role) <= roles.indexOf(cmd_level));
+                (cmd_level == null || roles.indexOf(ur_role) <= roles.indexOf(cmd_level));
             });
             switch (possible.length) {
                 case 0:
@@ -1727,26 +1761,26 @@ $(function() {
                 chr = String.fromCharCode(e.keyCode - 144);
             } else {
                 switch (e.keyCode) {
-                case 186:
-                    chr = ';';
-                    break;
-                case 187:
-                    chr = '=';
-                    break;
-                case 188:
-                    chr = ',';
-                    break;
-                case 192:
-                    chr = '`';
-                    break;
-                case 222:
-                    chr = '\'';
-                    break;
-                case 32:
-                    chr = ' ';
-                    break;
-                default:
-                    break;
+                    case 186:
+                        chr = ';';
+                        break;
+                    case 187:
+                        chr = '=';
+                        break;
+                    case 188:
+                        chr = ',';
+                        break;
+                    case 192:
+                        chr = '`';
+                        break;
+                    case 222:
+                        chr = '\'';
+                        break;
+                    case 32:
+                        chr = ' ';
+                        break;
+                    default:
+                        break;
                 }
             }
             if (list[0] === undefined) {
@@ -1815,8 +1849,8 @@ function video(event, type, input) {
             embed = '<iframe width="100%" height="100%" src="' + input + '" frameborder="0" allowfullscreen></iframe>';
             break;
         case 'audio':
-			embed = '<audio src="' + input + '" controls loop>' + input + '</audio>'
-			break;
+            embed = '<audio src="' + input + '" controls loop>' + input + '</audio>'
+            break;
     }
     var videoOverlay = $('.video-overlay');
     if (videoOverlay.length === 0) {
@@ -1841,7 +1875,7 @@ function video(event, type, input) {
         var container = $('<div class="container"></div>').css({
             width : '100%',
             height : 'calc(100% - 34px)',
-            backgroundColor : '#111'
+                                                               backgroundColor : '#111'
         }).appendTo(videoOverlay);
         var bottom = $('<div class="bottom"></div>').css({
             width : '100%',
@@ -1858,7 +1892,7 @@ function video(event, type, input) {
                 zIndex : 1000,
                 opacity : 0,
                 width : $(window).width() + 'px',
-                height : $(window).height() + 'px'
+                                        height : $(window).height() + 'px'
             }).appendTo('body').bind('selectstart', stop);
             $(document).bind('selectstart', stop);
         }).bind('selectstart', stop);
@@ -1870,7 +1904,7 @@ function video(event, type, input) {
                 var y = parseInt(videoOverlay.css('marginTop')) || 0;
                 videoOverlay.css({
                     marginLeft : (x + dx) + 'px',
-                    marginTop : (y + dy) + 'px'
+                                 marginTop : (y + dy) + 'px'
                 });
                 dragging = e;
             }
@@ -1886,28 +1920,28 @@ function video(event, type, input) {
     $('.container', videoOverlay).html(embed);
     videoOverlay.css({
         marginTop : (-videoOverlay.height() / 2) + 'px',
-        marginLeft : (-videoOverlay.width() / 2) + 'px'
+                     marginLeft : (-videoOverlay.width() / 2) + 'px'
     });
     videoOverlay.show();
     $(".video-overlay").resizable({
         start: function(event, ui) {
-        	$(".video-overlay iframe").css("display","none")
+            $(".video-overlay iframe").css("display","none")
         },
         stop: function(event, ui) {
-        	$(".video-overlay iframe").css("display","block")
+            $(".video-overlay iframe").css("display","block")
         }
     });
 }
 
 /* Scroll to bottom on resize */
 window.addEventListener('resize', function(e){
-	scrollToBottom();
+    scrollToBottom();
 });
 
 // -----------------------------------------------------------------------------
 // Cursors
 // -----------------------------------------------------------------------------
-$(function() {
+function Cursors() {
     var position = null, x, y;
     $(window).mousemove(function(e) {
         x = e.clientX / $(window).width();
@@ -1915,7 +1949,7 @@ $(function() {
     });
 
     setInterval(function() {
-        if (CLIENT.get('cursors') == 'off' ? 0 : 1 && !position || position.x != x || position.y != y) {
+        if (CLIENT.get('cursors') != 'off' && !position || position.x != x || position.y != y) {
             CLIENT.updateMousePosition(position = {
                 x : x,
                 y : y
@@ -1923,6 +1957,7 @@ $(function() {
         }
     }, 50);
     CLIENT.on('updateMousePosition', function(msg) {
+        console.log("m8");
         var el = $('#cursor-' + msg.id);
         if (el.length == 0) {
             var user = ONLINE.get(msg.id);
@@ -1937,7 +1972,7 @@ $(function() {
         }
         el.css({
             left : (msg.position.x * 100) + '%',
-            top : (msg.position.y * 100) + '%'
+               top : (msg.position.y * 100) + '%'
         });
     });
     ONLINE.on('remove', function(user) {
@@ -1951,4 +1986,4 @@ $(function() {
             display : cursors == 'off' ? 'none' : 'block'
         })
     });
-});
+};
